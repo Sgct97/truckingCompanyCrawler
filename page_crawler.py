@@ -76,11 +76,11 @@ class PageCrawler:
         self.urls_to_visit = [self.base_url]  # Homepage first!
         
         if initial_urls:
-            # Add other URLs, prioritizing location-related ones
-            # Sort initial URLs: index pages first, then priority pages, then others
+            # PRIORITY-ONLY MODE: Only crawl index and priority URLs
+            # This is MUCH faster and targets location pages directly
             index_urls = []
             priority_urls = []
-            other_urls = []
+            skipped = 0
             
             for url in initial_urls:
                 if url != self.base_url and url != self.base_url + '/':
@@ -89,14 +89,13 @@ class PageCrawler:
                     elif self._is_priority_url(url):
                         priority_urls.append(url)
                     else:
-                        other_urls.append(url)
+                        skipped += 1  # Skip non-priority URLs from sitemap
             
-            # Add in priority order: homepage -> index pages -> priority pages -> others
-            self.urls_to_visit.extend(index_urls)  # Index pages right after homepage
+            # Add ONLY priority URLs (skip "other" to be fast)
+            self.urls_to_visit.extend(index_urls)
             self.urls_to_visit.extend(priority_urls)
-            self.urls_to_visit.extend(other_urls)
             
-            print(f"  {self.carrier_name}: {len(index_urls)} index pages, {len(priority_urls)} priority, {len(other_urls)} other")
+            print(f"  {self.carrier_name}: {len(index_urls)} index, {len(priority_urls)} priority (skipped {skipped} non-priority)")
         
         print(f"  {self.carrier_name}: Starting with {len(self.urls_to_visit)} seed URLs")
         
@@ -139,22 +138,21 @@ class PageCrawler:
                     self.pages_data.append(page_data)
                     
                     # Extract and queue new URLs found on this page
+                    # PRIORITY-ONLY: Only add index/priority URLs (skip others)
                     new_urls = page_data.get('extracted_links', [])
                     added_count = 0
                     for new_url in new_urls:
                         if new_url not in self.visited_urls and new_url not in self.failed_urls:
                             if new_url not in self.urls_to_visit:
-                                added_count += 1
-                                # Index pages get highest priority (position 0)
-                                # Priority URLs go to front, others to back
+                                # Only add index or priority URLs
                                 if self._is_index_page(new_url):
                                     self.urls_to_visit.insert(0, new_url)
+                                    added_count += 1
                                 elif self._is_priority_url(new_url):
-                                    # Insert after any index pages at front
                                     insert_pos = min(5, len(self.urls_to_visit))
                                     self.urls_to_visit.insert(insert_pos, new_url)
-                                else:
-                                    self.urls_to_visit.append(new_url)
+                                    added_count += 1
+                                # Skip non-priority URLs entirely
                     
                     # Show progress every 10 pages or if we found many new links
                     if page_num % 10 == 0 or added_count > 20:
@@ -206,16 +204,14 @@ class PageCrawler:
             # Only INDEX pages and homepage get extended wait time
             if is_homepage or is_index:
                 # Give JS time to render important pages
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(2000)
                 # Try scrolling to trigger lazy-loaded content
                 try:
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await page.wait_for_timeout(1000)
+                    await page.wait_for_timeout(500)
                 except:
                     pass
-            else:
-                # All other pages - minimal wait (just for basic JS)
-                await page.wait_for_timeout(200)
+            # No wait for other pages - just get the content
             
             # Get the rendered HTML
             html = await page.content()
@@ -324,7 +320,8 @@ class PageCrawler:
         priority_keywords = [
             'location', 'terminal', 'facilit', 'service-center',
             'coverage', 'network', 'contact', 'about', 'find',
-            'branch', 'office', 'warehouse', 'yard', 'depot'
+            'branch', 'office', 'warehouse', 'yard', 'depot',
+            'loadboard', 'load-board', 'map', 'locator', 'finder'
         ]
         return any(kw in url_lower for kw in priority_keywords)
     
@@ -335,18 +332,31 @@ class PageCrawler:
         index_patterns = [
             '/locations', '/terminals', '/service-centers', '/facilities',
             '/branches', '/network', '/coverage', '/find-us', '/our-locations',
-            '/terminal-locations', '/all-locations', '/service-center-locator'
+            '/terminal-locations', '/all-locations', '/service-center-locator',
+            '/load-board/map', '/loadboard/map', '/map', '/locator'
         ]
         return any(url_lower.endswith(pattern) for pattern in index_patterns)
     
     async def _save_page_html(self, url: str, html: str) -> None:
-        """Save page HTML to file."""
+        """Save page HTML to file with original URL preserved."""
         # Create filename from URL hash
         url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
         filename = f"{url_hash}.html"
         filepath = self.output_dir / filename
         
         try:
+            # Inject original URL as meta tag if not already present
+            # This ensures classifier can identify the page even without canonical
+            if '<meta name="crawler-original-url"' not in html:
+                inject_tag = f'<meta name="crawler-original-url" content="{url}">\n'
+                # Insert after <head> tag
+                if '<head>' in html:
+                    html = html.replace('<head>', f'<head>\n{inject_tag}', 1)
+                elif '<head ' in html:
+                    # Handle <head with attributes
+                    head_end = html.find('>', html.find('<head ')) + 1
+                    html = html[:head_end] + f'\n{inject_tag}' + html[head_end:]
+            
             filepath.write_text(html, encoding='utf-8')
         except Exception:
             pass

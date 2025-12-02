@@ -155,70 +155,440 @@ class LocationClassifier:
         return ('neutral', 0)
     
     def classify_html(self, html: str, url: str = "", filename: str = "") -> PageClassification:
-        """Classify a single HTML page using scoring system."""
+        """Classify a single HTML page - NEW APPROACH with primary signal requirement."""
         soup = BeautifulSoup(html, 'lxml')
         title = ""
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
         
         classification = PageClassification(url=url or filename, title=title)
+        url_lower = (url or filename).lower()
         
-        # Get URL/title priority
-        priority, priority_points = self._get_url_priority(url or filename, title)
-        classification.url_priority = priority
+        # ============================================
+        # STEP 1: CHECK DISQUALIFIERS (auto-reject)
+        # ============================================
         
-        # If low priority, apply penalty but still check for signals
-        total_score = priority_points if priority_points > 0 else 0
-        penalty = priority_points if priority_points < 0 else 0
+        # Check for 404/error pages
+        if self._is_error_page(html, soup, title):
+            classification.is_location_page = False
+            classification.total_score = 0
+            classification.signals = [LocationSignal(
+                signal_type='DISQUALIFIED',
+                confidence='high',
+                points=0,
+                details='Error/404 page',
+                evidence=title[:50]
+            )]
+            return classification
         
-        # Run all detectors
+        # Check for non-English pages (unless URL suggests location content)
+        if self._is_non_english(soup) and not self._has_location_url(url_lower):
+            classification.is_location_page = False
+            classification.total_score = 0
+            classification.signals = [LocationSignal(
+                signal_type='DISQUALIFIED',
+                confidence='high',
+                points=0,
+                details='Non-English page',
+                evidence='lang attribute or content'
+            )]
+            return classification
+        
+        # Check for quote/lead/career pages (by URL pattern)
+        if self._is_excluded_page_type(url_lower, title):
+            classification.is_location_page = False
+            classification.total_score = 0
+            classification.signals = [LocationSignal(
+                signal_type='DISQUALIFIED',
+                confidence='high',
+                points=0,
+                details='Quote/career/excluded page type',
+                evidence=url[:50]
+            )]
+            return classification
+        
+        # ============================================
+        # STEP 2: CHECK FOR PRIMARY SIGNALS (must have one)
+        # ============================================
         signals = []
-        signals.extend(self._detect_text_addresses(html, soup))
-        signals.extend(self._detect_google_maps(html, soup))
-        signals.extend(self._detect_interactive_maps(html, soup))
-        signals.extend(self._detect_clickable_lists(html, soup))
-        signals.extend(self._detect_pdf_links(html, soup))
-        signals.extend(self._detect_location_search_forms(html, soup))
-        signals.extend(self._detect_json_ld(html, soup))
-        signals.extend(self._detect_static_image_maps(html, soup))
-        signals.extend(self._detect_api_endpoints(html, soup))
-        signals.extend(self._detect_coordinate_data(html, soup))
-        signals.extend(self._detect_location_iframes(html, soup))
+        has_primary_signal = False
+        total_score = 0
         
-        # Check if this is an INDEX page (highest value - lists ALL locations)
-        url_lower = (url or filename).lower().rstrip('/')
+        # PRIMARY 1: Location-specific URL (INDEX pages)
         is_index_page = any(p.search(url_lower) for p in self.index_patterns)
-        
         if is_index_page:
+            has_primary_signal = True
             signals.append(LocationSignal(
                 signal_type='INDEX_PAGE',
                 confidence='high',
-                points=10,  # BIG bonus for index pages
-                details='URL indicates this is a main location index/listing page',
-                evidence=url[:100]
+                points=15,
+                details='URL is a location index page',
+                evidence=url[:80]
             ))
-        elif priority == 'high':
-            # Add URL/title bonus as a signal if high priority (but not index)
-            signals.append(LocationSignal(
-                signal_type='URL_CONTEXT',
-                confidence='medium',
-                points=2,
-                details='URL or title suggests location page',
-                evidence=url[:100]
-            ))
+        
+        # PRIMARY 2: Multiple addresses (5+ = definitely a location list)
+        address_count, address_signal = self._count_real_addresses(html, soup)
+        if address_count >= 5:
+            has_primary_signal = True
+            signals.append(address_signal)
+        elif address_count >= 2:
+            # 2-4 addresses - could be location page, add as secondary
+            signals.append(address_signal)
+        
+        # PRIMARY 3: Map with multiple markers (coordinate data)
+        coord_count, coord_signal = self._count_coordinates(html)
+        if coord_count >= 3:
+            has_primary_signal = True
+            signals.append(coord_signal)
+        elif coord_count >= 1:
+            signals.append(coord_signal)
+        
+        # PRIMARY 4: Google Maps embed with location data
+        maps_signal = self._detect_google_maps_strict(html, soup)
+        if maps_signal and maps_signal.points >= 5:
+            has_primary_signal = True
+            signals.append(maps_signal)
+        elif maps_signal:
+            signals.append(maps_signal)
+        
+        # PRIMARY 5: Location finder/locator form
+        locator_signal = self._detect_location_finder_form(html, soup)
+        if locator_signal:
+            has_primary_signal = True
+            signals.append(locator_signal)
+        
+        # ============================================
+        # STEP 3: If no primary signal, check URL context
+        # ============================================
+        if not has_primary_signal:
+            # Check if URL suggests location content
+            if self._has_location_url(url_lower):
+                # URL suggests location - give it a chance with lower score
+                signals.append(LocationSignal(
+                    signal_type='URL_CONTEXT',
+                    confidence='medium',
+                    points=3,
+                    details='URL suggests location content',
+                    evidence=url[:60]
+                ))
+                has_primary_signal = True  # Allow through with URL context
+        
+        # ============================================
+        # STEP 4: If no primary signal, reject
+        # ============================================
+        if not has_primary_signal:
+            classification.is_location_page = False
+            classification.total_score = 0
+            classification.signals = signals if signals else [LocationSignal(
+                signal_type='NO_LOCATION_CONTENT',
+                confidence='high',
+                points=0,
+                details='No primary location signals found',
+                evidence=''
+            )]
+            return classification
+        
+        # ============================================
+        # STEP 5: Add secondary signals (bonus points)
+        # ============================================
+        
+        # JSON-LD with multiple locations
+        json_signal = self._detect_json_ld_strict(html, soup)
+        if json_signal:
+            signals.append(json_signal)
+        
+        # Interactive maps (Mapbox, Leaflet, ArcGIS)
+        map_signals = self._detect_interactive_maps(html, soup)
+        signals.extend(map_signals)
+        
+        # Location iframes
+        iframe_signals = self._detect_location_iframes(html, soup)
+        signals.extend(iframe_signals)
+        
+        # PDF links with location content
+        pdf_signals = self._detect_pdf_links(html, soup)
+        signals.extend(pdf_signals)
         
         # Calculate total score
         for signal in signals:
             total_score += signal.points
-        
-        # Apply penalty for low-priority pages
-        total_score += penalty
         
         classification.signals = signals
         classification.total_score = max(0, total_score)  # Don't go negative
         classification.is_location_page = total_score >= LOCATION_PAGE_THRESHOLD
         
         return classification
+    
+    # ============================================
+    # NEW HELPER METHODS FOR V2 CLASSIFIER
+    # ============================================
+    
+    def _is_error_page(self, html: str, soup: BeautifulSoup, title: str) -> bool:
+        """Check if page is a 404 or error page."""
+        title_lower = title.lower() if title else ''
+        
+        # Check title for error indicators
+        error_titles = ['404', 'not found', 'page not found', 'error', 'oops', 
+                       'page does not exist', 'page doesn\'t exist']
+        if any(err in title_lower for err in error_titles):
+            return True
+        
+        # Check for error status in HTML
+        html_lower = html.lower()
+        if '<h1>404' in html_lower or '<h1>page not found' in html_lower:
+            return True
+        
+        # Check for very short HTML (likely error page)
+        if len(html) < 2000:
+            return True
+        
+        return False
+    
+    def _is_non_english(self, soup: BeautifulSoup) -> bool:
+        """Check if page is non-English."""
+        html_tag = soup.find('html')
+        if html_tag:
+            lang = html_tag.get('lang', '').lower()
+            if lang and not lang.startswith('en'):
+                return True
+        return False
+    
+    def _has_location_url(self, url_lower: str) -> bool:
+        """Check if URL suggests location content."""
+        location_keywords = ['location', 'terminal', 'service-center', 'facility',
+                            'branch', 'find-us', 'coverage', 'network', 'depot',
+                            'warehouse', 'yard', 'office', 'loadboard', 'load-board',
+                            '/map', 'locator', 'finder']
+        return any(kw in url_lower for kw in location_keywords)
+    
+    def _is_excluded_page_type(self, url_lower: str, title: str) -> bool:
+        """Check if page type should be excluded (quote, career, etc.)."""
+        title_lower = title.lower() if title else ''
+        
+        exclude_patterns = [
+            'quote', 'get-a-quote', 'instant-quote', 'request-quote',
+            'career', 'job', 'apply', 'hiring',
+            'login', 'signin', 'register', 'signup',
+            'blog', 'news', 'press-release', 'article',
+            'investor', 'annual-report', 'earnings',
+            'privacy', 'terms', 'cookie', 'legal',
+            'cart', 'checkout', 'order'
+        ]
+        
+        if any(ex in url_lower for ex in exclude_patterns):
+            return True
+        if any(ex in title_lower for ex in exclude_patterns):
+            return True
+        
+        return False
+    
+    def _count_real_addresses(self, html: str, soup: BeautifulSoup) -> tuple:
+        """Count real addresses in main content (excluding footer/header)."""
+        # Create a copy and remove header/footer/nav
+        soup_copy = BeautifulSoup(str(soup), 'lxml')
+        for elem in soup_copy.find_all(['header', 'footer', 'nav']):
+            elem.decompose()
+        for elem in soup_copy.find_all(class_=re.compile(r'footer|header|nav-|navbar|menu|copyright', re.I)):
+            elem.decompose()
+        
+        text = soup_copy.get_text(separator=' ')
+        
+        addresses_found = set()
+        for pattern in self.compiled_address_patterns:
+            matches = pattern.findall(text)
+            for match in matches:
+                clean = match.strip()
+                if len(clean) > 15:
+                    addresses_found.add(clean)
+        
+        count = len(addresses_found)
+        
+        if count >= 5:
+            return count, LocationSignal(
+                signal_type='ADDRESS_LIST',
+                confidence='high',
+                points=10,
+                details=f'{count} addresses found - location listing page',
+                evidence='; '.join(list(addresses_found)[:3])
+            )
+        elif count >= 2:
+            return count, LocationSignal(
+                signal_type='ADDRESS_PAIR',
+                confidence='medium',
+                points=3,
+                details=f'{count} addresses found',
+                evidence='; '.join(list(addresses_found)[:2])
+            )
+        
+        return count, None
+    
+    def _count_coordinates(self, html: str) -> tuple:
+        """Count coordinate pairs in HTML."""
+        # Look for lat/lng patterns
+        coord_pattern = r'(?:lat|latitude)["\']?\s*[:=]\s*(-?\d{1,3}\.\d{3,})'
+        lat_matches = re.findall(coord_pattern, html, re.IGNORECASE)
+        
+        coord_pattern2 = r'LatLng\s*\(\s*(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*\)'
+        latlng_matches = re.findall(coord_pattern2, html)
+        
+        count = len(set(lat_matches)) + len(set(latlng_matches))
+        
+        if count >= 3:
+            return count, LocationSignal(
+                signal_type='COORDINATE_DATA',
+                confidence='high',
+                points=8,
+                details=f'{count} coordinate markers found',
+                evidence='Multiple lat/lng coordinates'
+            )
+        elif count >= 1:
+            return count, LocationSignal(
+                signal_type='COORDINATE_DATA',
+                confidence='medium',
+                points=2,
+                details=f'{count} coordinate(s) found',
+                evidence='lat/lng data'
+            )
+        
+        return count, None
+    
+    def _detect_google_maps_strict(self, html: str, soup: BeautifulSoup) -> LocationSignal:
+        """Detect REAL Google Maps embeds (not tag manager, recaptcha, etc.)."""
+        html_lower = html.lower()
+        
+        # STRICT patterns - must be actual map embeds, not Google services
+        real_map_patterns = [
+            'google.com/maps/embed',      # Embed URL
+            '/maps/d/embed',              # My Maps embed
+            'maps.google.com/maps?',      # Direct maps link
+            'google.com/maps?q=',         # Maps with query
+            'google.com/maps/place',      # Place embed
+        ]
+        
+        # EXCLUDE these Google services (false positives)
+        exclude_patterns = [
+            'googletagmanager',
+            'recaptcha',
+            'analytics',
+            'gtag',
+            'fonts.googleapis',
+            'ajax.googleapis',
+        ]
+        
+        # Check if we have a real map
+        has_real_map = any(p in html_lower for p in real_map_patterns)
+        
+        if has_real_map:
+            # Check iframes for actual map embeds
+            iframes = soup.find_all('iframe')
+            for iframe in iframes:
+                src = (iframe.get('src') or '').lower()
+                if any(p in src for p in real_map_patterns):
+                    if not any(e in src for e in exclude_patterns):
+                        return LocationSignal(
+                            signal_type='GOOGLE_MAPS_EMBED',
+                            confidence='high',
+                            points=5,
+                            details='Google Maps embed iframe',
+                            evidence=src[:80]
+                        )
+            
+            # Even without iframe, if we have maps.google.com/maps? it's a map link
+            if 'maps.google.com/maps?' in html_lower:
+                return LocationSignal(
+                    signal_type='GOOGLE_MAPS_LINK',
+                    confidence='high',
+                    points=4,
+                    details='Google Maps link',
+                    evidence='maps.google.com/maps?'
+                )
+        
+        # Check for Maps JavaScript API
+        if 'maps.googleapis.com/maps/api/js' in html_lower:
+            # Check for various map initialization patterns
+            map_init_patterns = ['new google.maps.map', 'google.maps.marker', 
+                                'google.maps.infowindow', 'initmap', 'mapinit', 'loadmap']
+            if any(p in html_lower for p in map_init_patterns):
+                return LocationSignal(
+                    signal_type='GOOGLE_MAPS_API',
+                    confidence='high',
+                    points=5,
+                    details='Google Maps JavaScript API',
+                    evidence='maps.googleapis.com'
+                )
+        
+        return None
+    
+    def _detect_location_finder_form(self, html: str, soup: BeautifulSoup) -> LocationSignal:
+        """Detect actual location finder forms (not quote forms)."""
+        forms = soup.find_all('form')
+        
+        for form in forms:
+            form_html = str(form).lower()
+            form_action = form.get('action', '').lower()
+            form_text = form.get_text().lower()
+            
+            # MUST have location finder language
+            finder_keywords = ['find location', 'find terminal', 'find facility',
+                              'locate', 'search location', 'find near', 'nearby',
+                              'service center locator', 'terminal locator']
+            
+            has_finder_language = any(kw in form_html or kw in form_text for kw in finder_keywords)
+            
+            # MUST have radius/distance (quote forms don't have this)
+            has_radius = any(r in form_html for r in ['radius', 'distance', 'miles', 'within'])
+            
+            # Should NOT have quote-related content
+            is_quote_form = any(q in form_html or q in form_action for q in 
+                               ['quote', 'lead', 'contact', 'order', 'ship'])
+            
+            if has_finder_language and not is_quote_form:
+                return LocationSignal(
+                    signal_type='LOCATION_FINDER',
+                    confidence='high',
+                    points=8,
+                    details='Location finder/locator form',
+                    evidence='Form with location search capability'
+                )
+            elif has_radius and not is_quote_form:
+                return LocationSignal(
+                    signal_type='LOCATION_SEARCH',
+                    confidence='medium',
+                    points=4,
+                    details='Search form with radius/distance',
+                    evidence='Form with radius search'
+                )
+        
+        return None
+    
+    def _detect_json_ld_strict(self, html: str, soup: BeautifulSoup) -> LocationSignal:
+        """Detect JSON-LD with MULTIPLE locations (not just company HQ)."""
+        scripts = soup.find_all('script', type='application/ld+json')
+        location_count = 0
+        
+        for script in scripts:
+            try:
+                data = json.loads(script.string or '{}')
+                data_str = json.dumps(data).lower()
+                
+                # Count distinct addresses
+                location_count += data_str.count('"streetaddress"')
+                location_count += data_str.count('"postalcode"')
+                
+            except:
+                continue
+        
+        # Need multiple locations (not just one company address)
+        if location_count >= 4:  # 2+ locations (each has street + postal)
+            return LocationSignal(
+                signal_type='JSON_LD_LOCATIONS',
+                confidence='high',
+                points=5,
+                details=f'JSON-LD with {location_count//2}+ locations',
+                evidence='Structured data with multiple addresses'
+            )
+        
+        return None
     
     def _detect_text_addresses(self, html: str, soup: BeautifulSoup) -> List[LocationSignal]:
         """Detect multiple addresses in main content (not footer/header)."""
@@ -695,8 +1065,13 @@ class LocationClassifier:
         return signals
     
     def _extract_url_from_html(self, html: str, soup: BeautifulSoup) -> str:
-        """Extract actual URL from HTML (canonical, og:url, or other meta tags)."""
-        # Try canonical link first
+        """Extract actual URL from HTML (canonical, og:url, or crawler-injected tag)."""
+        # Try crawler-injected original URL first (most reliable)
+        crawler_url = soup.find('meta', attrs={'name': 'crawler-original-url'})
+        if crawler_url and crawler_url.get('content'):
+            return crawler_url['content']
+        
+        # Try canonical link
         canonical = soup.find('link', rel='canonical')
         if canonical and canonical.get('href'):
             return canonical['href']
