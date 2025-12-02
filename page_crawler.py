@@ -77,12 +77,26 @@ class PageCrawler:
         
         if initial_urls:
             # Add other URLs, prioritizing location-related ones
+            # Sort initial URLs: index pages first, then priority pages, then others
+            index_urls = []
+            priority_urls = []
+            other_urls = []
+            
             for url in initial_urls:
                 if url != self.base_url and url != self.base_url + '/':
-                    if self._is_priority_url(url):
-                        self.urls_to_visit.insert(1, url)  # After homepage
+                    if self._is_index_page(url):
+                        index_urls.append(url)
+                    elif self._is_priority_url(url):
+                        priority_urls.append(url)
                     else:
-                        self.urls_to_visit.append(url)
+                        other_urls.append(url)
+            
+            # Add in priority order: homepage -> index pages -> priority pages -> others
+            self.urls_to_visit.extend(index_urls)  # Index pages right after homepage
+            self.urls_to_visit.extend(priority_urls)
+            self.urls_to_visit.extend(other_urls)
+            
+            print(f"  {self.carrier_name}: {len(index_urls)} index pages, {len(priority_urls)} priority, {len(other_urls)} other")
         
         print(f"  {self.carrier_name}: Starting with {len(self.urls_to_visit)} seed URLs")
         
@@ -131,9 +145,14 @@ class PageCrawler:
                         if new_url not in self.visited_urls and new_url not in self.failed_urls:
                             if new_url not in self.urls_to_visit:
                                 added_count += 1
-                                # Add priority URLs to front, others to back
-                                if self._is_priority_url(new_url):
+                                # Index pages get highest priority (position 0)
+                                # Priority URLs go to front, others to back
+                                if self._is_index_page(new_url):
                                     self.urls_to_visit.insert(0, new_url)
+                                elif self._is_priority_url(new_url):
+                                    # Insert after any index pages at front
+                                    insert_pos = min(5, len(self.urls_to_visit))
+                                    self.urls_to_visit.insert(insert_pos, new_url)
                                 else:
                                     self.urls_to_visit.append(new_url)
                     
@@ -180,18 +199,23 @@ class PageCrawler:
                 self.failed_urls.add(url)
                 return None
             
-            # Wait longer for homepage/first page to get JS-rendered navigation
-            if is_homepage:
-                # Give JS time to render
+            # Check if this is an INDEX page (highest priority - needs full JS render)
+            url_lower = url.lower()
+            is_index = self._is_index_page(url)
+            
+            # Only INDEX pages and homepage get extended wait time
+            if is_homepage or is_index:
+                # Give JS time to render important pages
                 await page.wait_for_timeout(3000)
-                # Try scrolling to trigger lazy-loaded content (but don't fail if it errors)
+                # Try scrolling to trigger lazy-loaded content
                 try:
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-                    await page.wait_for_timeout(500)
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await page.wait_for_timeout(1000)
                 except:
-                    pass  # Scrolling failed, but we still have the page content
+                    pass
+            else:
+                # All other pages - minimal wait (just for basic JS)
+                await page.wait_for_timeout(200)
             
             # Get the rendered HTML
             html = await page.content()
@@ -303,6 +327,17 @@ class PageCrawler:
             'branch', 'office', 'warehouse', 'yard', 'depot'
         ]
         return any(kw in url_lower for kw in priority_keywords)
+    
+    def _is_index_page(self, url: str) -> bool:
+        """Check if URL is likely an INDEX page listing all locations (highest priority)."""
+        url_lower = url.lower().rstrip('/')
+        # Index pages end with the keyword, not have more path segments after
+        index_patterns = [
+            '/locations', '/terminals', '/service-centers', '/facilities',
+            '/branches', '/network', '/coverage', '/find-us', '/our-locations',
+            '/terminal-locations', '/all-locations', '/service-center-locator'
+        ]
+        return any(url_lower.endswith(pattern) for pattern in index_patterns)
     
     async def _save_page_html(self, url: str, html: str) -> None:
         """Save page HTML to file."""
