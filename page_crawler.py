@@ -315,13 +315,17 @@ class PageCrawler:
         return {}
     
     def _is_priority_url(self, url: str) -> bool:
-        """Check if URL is likely to contain location data."""
+        """Check if URL is likely to contain location data.
+        
+        STRICTER: Removed 'coverage', 'network', 'warehouse', 'about', 'contact' 
+        as they match too many non-location pages.
+        """
         url_lower = url.lower()
         priority_keywords = [
-            'location', 'terminal', 'facilit', 'service-center',
-            'coverage', 'network', 'contact', 'about', 'find',
-            'branch', 'office', 'warehouse', 'yard', 'depot',
-            'loadboard', 'load-board', 'map', 'locator', 'finder'
+            'location', 'terminal', 'facilit', 'service-center', 'service-location',
+            'find-us', 'find-location', 'branch', 'yard', 'depot',
+            'loadboard', 'load-board', 'map', 'locator', 'finder',
+            'servicemap', 'branch-locator', 'store-locator', 'dealer-locator'
         ]
         return any(kw in url_lower for kw in priority_keywords)
     
@@ -330,12 +334,21 @@ class PageCrawler:
         url_lower = url.lower().rstrip('/')
         # Index pages end with the keyword, not have more path segments after
         index_patterns = [
-            '/locations', '/terminals', '/service-centers', '/facilities',
-            '/branches', '/network', '/coverage', '/find-us', '/our-locations',
-            '/terminal-locations', '/all-locations', '/service-center-locator',
-            '/load-board/map', '/loadboard/map', '/map', '/locator'
+            '/locations', '/locations.html', '/our-locations',
+            '/terminals', '/terminal-locations', '/all-locations',
+            '/service-centers', '/service-center', '/service-center-locator',
+            '/service-locations', '/facilities', '/branches',
+            '/find-us', '/find-location', '/branch-locator',
+            '/load-board/map', '/loadboard/map', '/map', '/map.html',
+            '/locator', '/store-locator', '/dealer-locator'
         ]
-        return any(url_lower.endswith(pattern) for pattern in index_patterns)
+        # Also check for pattern matches (case-insensitive)
+        if any(url_lower.endswith(pattern) for pattern in index_patterns):
+            return True
+        # Check for servicemap.pdf
+        if 'servicemap' in url_lower and '.pdf' in url_lower:
+            return True
+        return False
     
     async def _save_page_html(self, url: str, html: str) -> None:
         """Save page HTML to file with original URL preserved."""

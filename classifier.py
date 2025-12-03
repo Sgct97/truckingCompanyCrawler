@@ -60,27 +60,36 @@ class LocationClassifier:
     # These are the main pages that list ALL locations
     INDEX_URL_PATTERNS = [
         r'/locations/?$',           # swifttrans.com/locations
+        r'/locations\.html',        # usfoods.com/locations.html
+        r'/Our-Locations',          # performancefoodservice.com/Our-Locations
+        r'/our-locations/?$',
+        r'/all-locations/?$',
         r'/terminals/?$',           # ends with /terminals
         r'/terminals$',             # saia.com/tools-and-resources/terminals
         r'terminals/?$',            # any URL ending in terminals
         r'/service-centers/?$',
-        r'service-center-locator/?$',
+        r'/service-center/?$',
+        r'service-center-locator',  # odfl service center locator
+        r'/service-locations',      # universalintermodal.com/customers/service-locations
         r'/facilities/?$',
         r'/branches/?$',
-        r'/network/?$',
-        r'/coverage/?$',
         r'/find-us/?$',
-        r'/our-locations/?$',
-        r'/all-locations/?$',
         r'/terminal-locations/?$',
-        r'/service-center/?$',
+        r'/branch-locator',         # dbschenker branch-locator
+        r'/map\.html',              # wallstreetsystems.com/map.html
+        r'servicemap\.pdf',         # centraltransport servicemap.pdf
+        r'/locator/?$',             # generic locator pages
+        r'/find-location',
+        r'/store-locator',
+        r'/dealer-locator',
     ]
     
     # URL patterns that suggest location content (HIGH priority)
+    # REMOVED: 'network', 'coverage', 'warehouse' - too broad, match non-location pages
     HIGH_PRIORITY_URL_PATTERNS = [
         r'location', r'terminal', r'service.?center', r'facilit', 
-        r'branch', r'office', r'coverage', r'network', r'find.?us',
-        r'contact.?us', r'warehouse', r'yard', r'depot', r'where.?we'
+        r'branch', r'office', r'find.?us', r'locator', r'finder',
+        r'yard', r'depot', r'where.?we', r'map\.html', r'servicemap'
     ]
     
     # URL patterns that suggest NON-location content (LOW priority)
@@ -89,6 +98,20 @@ class LocationClassifier:
         r'SEC', r'earning', r'stock', r'annual.?report', r'quarter',
         r'privacy', r'terms', r'legal', r'cookie', r'login', r'sign.?in',
         r'cart', r'checkout', r'account'
+    ]
+    
+    # URL patterns for NON-US pages (should be deprioritized)
+    NON_US_URL_PATTERNS = [
+        r'/eu/', r'/europe/', r'/fr/', r'/de/', r'/es/', r'/uk/', r'/gb/',
+        r'/global/', r'/international/', r'/asia/', r'/apac/', r'/latam/',
+        r'/fr-', r'/de-', r'/es-', r'/it-', r'/nl-', r'/pt-',  # language codes
+        r'\.fr/', r'\.de/', r'\.es/', r'\.co\.uk/', r'\.eu/',  # country TLDs in path
+    ]
+    
+    # URL patterns for US pages (should be boosted)
+    US_URL_PATTERNS = [
+        r'/us/', r'/en-us/', r'/united-states/', r'/usa/',
+        r'/en/', r'\.com/', r'\.com$'  # .com without regional paths is US-default
     ]
     
     # Title patterns for location pages
@@ -126,6 +149,12 @@ class LocationClassifier:
         self.low_priority_patterns = [
             re.compile(p, re.IGNORECASE) for p in self.LOW_PRIORITY_URL_PATTERNS
         ]
+        self.non_us_patterns = [
+            re.compile(p, re.IGNORECASE) for p in self.NON_US_URL_PATTERNS
+        ]
+        self.us_patterns = [
+            re.compile(p, re.IGNORECASE) for p in self.US_URL_PATTERNS
+        ]
     
     def _get_url_priority(self, url: str, title: str) -> Tuple[str, int]:
         """Determine URL priority and bonus points."""
@@ -137,22 +166,27 @@ class LocationClassifier:
             if pattern.search(url_lower) or pattern.search(title_lower):
                 return ('low', -5)  # Strong penalty for likely non-location pages
         
+        # Check for NON-US pages - penalize (but don't disqualify)
+        is_non_us = any(p.search(url_lower) for p in self.non_us_patterns)
+        is_us = any(p.search(url_lower) for p in self.us_patterns)
+        us_penalty = -3 if is_non_us and not is_us else 0
+        
         # Check for INDEX pages (e.g., /locations, /terminals) - HIGHEST priority
         for pattern in self.index_patterns:
             if pattern.search(url_lower):
-                return ('index', 10)  # BIG bonus for main location index pages
+                return ('index', 10 + us_penalty)  # BIG bonus for main location index pages
         
         # Check for high priority (location-related URLs)
         for pattern in self.high_priority_patterns:
             if pattern.search(url_lower):
-                return ('high', 2)  # Bonus for location-like URL
+                return ('high', 2 + us_penalty)  # Bonus for location-like URL
         
         # Check title for location keywords
         for keyword in self.LOCATION_TITLE_KEYWORDS:
             if keyword in title_lower:
-                return ('high', 2)
+                return ('high', 2 + us_penalty)
         
-        return ('neutral', 0)
+        return ('neutral', us_penalty)
     
     def classify_html(self, html: str, url: str = "", filename: str = "") -> PageClassification:
         """Classify a single HTML page - NEW APPROACH with primary signal requirement."""
@@ -355,10 +389,11 @@ class LocationClassifier:
     
     def _has_location_url(self, url_lower: str) -> bool:
         """Check if URL suggests location content."""
-        location_keywords = ['location', 'terminal', 'service-center', 'facility',
-                            'branch', 'find-us', 'coverage', 'network', 'depot',
-                            'warehouse', 'yard', 'office', 'loadboard', 'load-board',
-                            '/map', 'locator', 'finder']
+        # STRICT location keywords - removed 'coverage', 'network', 'warehouse', 'office'
+        location_keywords = ['location', 'terminal', 'service-center', 'service-location',
+                            'facility', 'branch', 'find-us', 'depot', 'yard', 
+                            'loadboard', 'load-board', '/map', 'locator', 'finder',
+                            'servicemap', 'branch-locator', 'store-locator']
         return any(kw in url_lower for kw in location_keywords)
     
     def _is_excluded_page_type(self, url_lower: str, title: str) -> bool:
@@ -453,7 +488,11 @@ class LocationClassifier:
         return count, None
     
     def _detect_google_maps_strict(self, html: str, soup: BeautifulSoup) -> LocationSignal:
-        """Detect REAL Google Maps embeds (not tag manager, recaptcha, etc.)."""
+        """Detect REAL Google Maps embeds (not tag manager, recaptcha, etc.).
+        
+        CRITICAL: A single map showing just the corporate HQ is NOT a location page.
+        We need evidence of MULTIPLE markers or location-rich content.
+        """
         html_lower = html.lower()
         
         # STRICT patterns - must be actual map embeds, not Google services
@@ -478,6 +517,10 @@ class LocationClassifier:
         # Check if we have a real map
         has_real_map = any(p in html_lower for p in real_map_patterns)
         
+        # Count Google Maps links (MULTIPLE = location list, SINGLE = just HQ)
+        maps_links = soup.find_all('a', href=re.compile(r'google\.com/maps|maps\.google\.com', re.I))
+        maps_link_count = len(maps_links)
+        
         if has_real_map:
             # Check iframes for actual map embeds
             iframes = soup.find_all('iframe')
@@ -485,22 +528,34 @@ class LocationClassifier:
                 src = (iframe.get('src') or '').lower()
                 if any(p in src for p in real_map_patterns):
                     if not any(e in src for e in exclude_patterns):
+                        # Single embed with no other location signals = likely just HQ map
+                        # Give lower points unless there are other location signals
+                        points = 3 if maps_link_count < 3 else 5
                         return LocationSignal(
                             signal_type='GOOGLE_MAPS_EMBED',
-                            confidence='high',
-                            points=5,
-                            details='Google Maps embed iframe',
+                            confidence='medium' if points == 3 else 'high',
+                            points=points,
+                            details=f'Google Maps embed iframe (links={maps_link_count})',
                             evidence=src[:80]
                         )
             
-            # Even without iframe, if we have maps.google.com/maps? it's a map link
-            if 'maps.google.com/maps?' in html_lower:
+            # Multiple Google Maps links = definitely a location list
+            if maps_link_count >= 3:
                 return LocationSignal(
                     signal_type='GOOGLE_MAPS_LINK',
                     confidence='high',
-                    points=4,
-                    details='Google Maps link',
-                    evidence='maps.google.com/maps?'
+                    points=5,
+                    details=f'{maps_link_count} Google Maps links',
+                    evidence='Multiple maps.google.com links'
+                )
+            elif maps_link_count == 1:
+                # Single link = likely just HQ - very low value
+                return LocationSignal(
+                    signal_type='GOOGLE_MAPS_LINK',
+                    confidence='low',
+                    points=1,
+                    details='Single Google Maps link (likely HQ only)',
+                    evidence='maps.google.com link'
                 )
         
         # Check for Maps JavaScript API
@@ -509,13 +564,31 @@ class LocationClassifier:
             map_init_patterns = ['new google.maps.map', 'google.maps.marker', 
                                 'google.maps.infowindow', 'initmap', 'mapinit', 'loadmap']
             if any(p in html_lower for p in map_init_patterns):
-                return LocationSignal(
-                    signal_type='GOOGLE_MAPS_API',
-                    confidence='high',
-                    points=5,
-                    details='Google Maps JavaScript API',
-                    evidence='maps.googleapis.com'
-                )
+                # Check for multiple markers (evidence of multiple locations)
+                marker_count = html_lower.count('google.maps.marker')
+                marker_count += html_lower.count('addmarker')
+                marker_count += html_lower.count('new marker')
+                
+                # Also count LatLng which indicates markers
+                latlng_count = len(re.findall(r'latlng\s*\(', html_lower))
+                
+                if marker_count >= 3 or latlng_count >= 3:
+                    return LocationSignal(
+                        signal_type='GOOGLE_MAPS_API',
+                        confidence='high',
+                        points=5,
+                        details=f'Google Maps API with multiple markers (~{max(marker_count, latlng_count)})',
+                        evidence='maps.googleapis.com with multiple markers'
+                    )
+                else:
+                    # Single marker = likely just HQ
+                    return LocationSignal(
+                        signal_type='GOOGLE_MAPS_API',
+                        confidence='low',
+                        points=2,
+                        details='Google Maps API (possibly single marker)',
+                        evidence='maps.googleapis.com'
+                    )
         
         return None
     
@@ -786,26 +859,42 @@ class LocationClassifier:
         signals = []
         
         links = soup.find_all('a', href=True)
-        location_pdfs = []
+        high_value_pdfs = []  # servicemap, terminal-map, etc.
+        regular_pdfs = []
         
-        location_keywords = ['location', 'terminal', 'service', 'facility', 
-                           'network', 'coverage', 'directory', 'map']
+        # HIGH VALUE: These PDFs are specifically maps/location lists
+        high_value_keywords = ['servicemap', 'service-map', 'terminal-map', 'location-map',
+                              'coverage-map', 'network-map', 'facility-map', 'directory']
+        
+        # REGULAR: These might have location data
+        regular_keywords = ['location', 'terminal', 'service', 'facility', 'map']
         
         for link in links:
             href = link.get('href', '').lower()
             text = link.get_text().lower()
             
             if '.pdf' in href:
-                if any(kw in href or kw in text for kw in location_keywords):
-                    location_pdfs.append(href)
+                # Check for high-value map PDFs first
+                if any(kw in href for kw in high_value_keywords):
+                    high_value_pdfs.append(href)
+                elif any(kw in href or kw in text for kw in regular_keywords):
+                    regular_pdfs.append(href)
         
-        if location_pdfs:
+        if high_value_pdfs:
+            signals.append(LocationSignal(
+                signal_type='PDF_SERVICEMAP',
+                confidence='high',
+                points=8,  # HIGH value - servicemap.pdf is often THE source
+                details=f"Service/location map PDF: {high_value_pdfs[0][:50]}",
+                evidence='; '.join(high_value_pdfs[:2])
+            ))
+        elif regular_pdfs:
             signals.append(LocationSignal(
                 signal_type='PDF_LOCATIONS',
                 confidence='medium',
                 points=2,
-                details=f"{len(location_pdfs)} location-related PDF(s)",
-                evidence='; '.join(location_pdfs[:2])
+                details=f"{len(regular_pdfs)} location-related PDF(s)",
+                evidence='; '.join(regular_pdfs[:2])
             ))
         
         return signals
