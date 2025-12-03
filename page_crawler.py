@@ -69,6 +69,9 @@ class PageCrawler:
         """
         Crawl the website starting from initial_urls.
         Returns crawl results and statistics.
+        
+        NEW APPROACH: Crawl ALL homepage links + ALL PDFs + tool subdomains.
+        Let classifier score pages instead of pre-filtering.
         """
         self.start_time = datetime.now()
         
@@ -76,26 +79,23 @@ class PageCrawler:
         self.urls_to_visit = [self.base_url]  # Homepage first!
         
         if initial_urls:
-            # PRIORITY-ONLY MODE: Only crawl index and priority URLs
-            # This is MUCH faster and targets location pages directly
+            # Add sitemap URLs - prioritize index pages but include all
             index_urls = []
-            priority_urls = []
-            skipped = 0
+            other_urls = []
             
             for url in initial_urls:
                 if url != self.base_url and url != self.base_url + '/':
-                    if self._is_index_page(url):
+                    if self._is_index_page(url) or self._is_pdf_or_map(url):
                         index_urls.append(url)
-                    elif self._is_priority_url(url):
-                        priority_urls.append(url)
                     else:
-                        skipped += 1  # Skip non-priority URLs from sitemap
+                        other_urls.append(url)
             
-            # Add ONLY priority URLs (skip "other" to be fast)
+            # Add index/PDF URLs first, then others (up to limit)
             self.urls_to_visit.extend(index_urls)
-            self.urls_to_visit.extend(priority_urls)
+            # Add some other URLs too (classifier will filter)
+            self.urls_to_visit.extend(other_urls[:50])
             
-            print(f"  {self.carrier_name}: {len(index_urls)} index, {len(priority_urls)} priority (skipped {skipped} non-priority)")
+            print(f"  {self.carrier_name}: {len(index_urls)} index/PDF, {len(other_urls)} other from sitemap")
         
         print(f"  {self.carrier_name}: Starting with {len(self.urls_to_visit)} seed URLs")
         
@@ -138,21 +138,24 @@ class PageCrawler:
                     self.pages_data.append(page_data)
                     
                     # Extract and queue new URLs found on this page
-                    # PRIORITY-ONLY: Only add index/priority URLs (skip others)
+                    # NEW: Add ALL links from homepage, prioritize index/PDFs from other pages
                     new_urls = page_data.get('extracted_links', [])
                     added_count = 0
                     for new_url in new_urls:
                         if new_url not in self.visited_urls and new_url not in self.failed_urls:
                             if new_url not in self.urls_to_visit:
-                                # Only add index or priority URLs
-                                if self._is_index_page(new_url):
+                                # Always add index pages and PDFs/maps at front
+                                if self._is_index_page(new_url) or self._is_pdf_or_map(new_url):
                                     self.urls_to_visit.insert(0, new_url)
                                     added_count += 1
-                                elif self._is_priority_url(new_url):
-                                    insert_pos = min(5, len(self.urls_to_visit))
-                                    self.urls_to_visit.insert(insert_pos, new_url)
+                                # Add tool subdomain links (often have location finders)
+                                elif self._is_tool_subdomain(new_url):
+                                    self.urls_to_visit.insert(1, new_url)
                                     added_count += 1
-                                # Skip non-priority URLs entirely
+                                # From ANY page: add ALL same-site links (classifier will filter)
+                                elif self._is_same_site(new_url):
+                                    self.urls_to_visit.append(new_url)
+                                    added_count += 1
                     
                     # Show progress every 10 pages or if we found many new links
                     if page_num % 10 == 0 or added_count > 20:
@@ -315,19 +318,49 @@ class PageCrawler:
         return {}
     
     def _is_priority_url(self, url: str) -> bool:
-        """Check if URL is likely to contain location data.
-        
-        STRICTER: Removed 'coverage', 'network', 'warehouse', 'about', 'contact' 
-        as they match too many non-location pages.
-        """
+        """Check if URL is likely to contain location data."""
         url_lower = url.lower()
         priority_keywords = [
             'location', 'terminal', 'facilit', 'service-center', 'service-location',
             'find-us', 'find-location', 'branch', 'yard', 'depot',
             'loadboard', 'load-board', 'map', 'locator', 'finder',
-            'servicemap', 'branch-locator', 'store-locator', 'dealer-locator'
+            'servicemap', 'branch-locator', 'store-locator', 'dealer-locator',
+            'centers', 'coverage', 'network'  # Added back - classifier will filter
         ]
         return any(kw in url_lower for kw in priority_keywords)
+    
+    def _is_pdf_or_map(self, url: str) -> bool:
+        """Check if URL is a PDF or map file - ALWAYS crawl these."""
+        url_lower = url.lower()
+        # PDFs with location-related names
+        if '.pdf' in url_lower:
+            pdf_keywords = ['map', 'service', 'terminal', 'location', 'network', 
+                           'coverage', 'facility', 'directory']
+            return any(kw in url_lower for kw in pdf_keywords)
+        return False
+    
+    def _is_tool_subdomain(self, url: str) -> bool:
+        """Check if URL is on a tool/app subdomain - often have location finders."""
+        url_lower = url.lower()
+        tool_patterns = [
+            'ext-web.', 'tools.', 'apps.', 'app.', 'my.', 'portal.',
+            'locator.', 'finder.', 'search.'
+        ]
+        return any(p in url_lower for p in tool_patterns)
+    
+    def _is_same_site(self, url: str) -> bool:
+        """Check if URL is on the same site (including subdomains)."""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            base_parsed = urlparse(self.base_url)
+            # Extract base domain (e.g., xpo.com from ext-web.ltl-xpo.com)
+            url_domain = parsed.netloc.lower()
+            base_domain = base_parsed.netloc.lower().replace('www.', '')
+            # Check if it's same domain or subdomain
+            return base_domain in url_domain or url_domain.endswith('.' + base_domain)
+        except:
+            return False
     
     def _is_index_page(self, url: str) -> bool:
         """Check if URL is likely an INDEX page listing all locations (highest priority)."""

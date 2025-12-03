@@ -64,6 +64,8 @@ class LocationClassifier:
         r'/Our-Locations',          # performancefoodservice.com/Our-Locations
         r'/our-locations/?$',
         r'/all-locations/?$',
+        r'centersResult',           # sefl.com/seflWebsite/about/centersResult.jsp
+        r'/coverage',               # arcb.com/shippers/coverage-area/
         r'/terminals/?$',           # ends with /terminals
         r'/terminals$',             # saia.com/tools-and-resources/terminals
         r'terminals/?$',            # any URL ending in terminals
@@ -106,6 +108,7 @@ class LocationClassifier:
         r'/global/', r'/international/', r'/asia/', r'/apac/', r'/latam/',
         r'/fr-', r'/de-', r'/es-', r'/it-', r'/nl-', r'/pt-',  # language codes
         r'\.fr/', r'\.de/', r'\.es/', r'\.co\.uk/', r'\.eu/',  # country TLDs in path
+        r'europe\.',  # europe.xpo.com subdomain
     ]
     
     # URL patterns for US pages (should be boosted)

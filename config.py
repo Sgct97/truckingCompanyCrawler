@@ -13,7 +13,7 @@ REPORTS_DIR = DATA_DIR / "reports"
 CARRIERS_FILE = PROJECT_ROOT.parent / "2025-11-25 Top Fleets for Spenser.xlsx"
 
 # Crawl settings
-MAX_PAGES_PER_SITE = 100  # Only crawl priority/index pages (location-related)
+MAX_PAGES_PER_SITE = 500  # Safety cap - crawls all discovered links up to this limit
 MAX_CONCURRENT_BROWSERS = 10  # Parallel browser instances
 PAGE_TIMEOUT_MS = 30000  # 30 seconds per page - shared browser needs more time
 REQUEST_DELAY_MS = 0  # No delay - page load time is enough
