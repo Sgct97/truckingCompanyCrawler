@@ -255,11 +255,15 @@ class LocationClassifier:
         is_index_page = any(p.search(url_lower) for p in self.index_patterns)
         if is_index_page:
             has_primary_signal = True
+            # Apply non-US penalty to index pages
+            is_non_us = any(p.search(url_lower) for p in self.non_us_patterns)
+            is_us = any(p.search(url_lower) for p in self.us_patterns)
+            index_points = 15 if not is_non_us else (12 if is_us else 8)  # Non-US penalty
             signals.append(LocationSignal(
                 signal_type='INDEX_PAGE',
                 confidence='high',
-                points=15,
-                details='URL is a location index page',
+                points=index_points,
+                details=f'URL is a location index page{" (non-US)" if is_non_us else ""}',
                 evidence=url[:80]
             ))
         
@@ -1275,6 +1279,10 @@ class LocationClassifier:
         
         if modality_counts.get('STATIC_IMAGE_MAP'):
             recommendations.append("IMAGE: OCR/manual extraction from static image map")
+        
+        # Default for INDEX pages with no other signals
+        if not recommendations and (modality_counts.get('INDEX_PAGE') or modality_counts.get('LOCATION_INDEX')):
+            recommendations.append("INDEX: Navigate to index page and scrape HTML directly")
         
         return ' | '.join(recommendations) if recommendations else "Manual review needed"
 
