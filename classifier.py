@@ -1226,34 +1226,57 @@ class LocationClassifier:
         return report
     
     def _generate_recommendation(self, modality_counts: Dict[str, int]) -> str:
-        """Generate extraction approach recommendation."""
+        """Generate extraction approach recommendation with priority ordering."""
         if not modality_counts:
             return "No location data detected - manual review needed"
         
+        # Priority-ordered recommendations (easiest/most reliable first)
         recommendations = []
         
-        if modality_counts.get('ADDRESS_LIST') or modality_counts.get('ADDRESS_PAIR'):
-            recommendations.append("Parse addresses from HTML")
+        # 1. EASIEST: Structured data already in machine-readable format
+        if modality_counts.get('JSON_LD_LOCATION') or modality_counts.get('JSON_LD_LOCATIONS'):
+            recommendations.append("JSON-LD: Parse structured data from <script type='application/ld+json'>")
         
+        if modality_counts.get('API_ENDPOINT'):
+            recommendations.append("API: Query discovered API endpoints directly")
+        
+        if modality_counts.get('COORDINATE_DATA'):
+            recommendations.append("COORDS: Extract lat/lng pairs from page source")
+        
+        # 2. MODERATE: Direct HTML/PDF parsing
+        if modality_counts.get('ADDRESS_LIST'):
+            recommendations.append("HTML: Scrape address list from page (10+ addresses)")
+        elif modality_counts.get('ADDRESS_PAIR'):
+            recommendations.append("HTML: Parse city/state pairs from page")
+        
+        if modality_counts.get('PDF_SERVICEMAP') or modality_counts.get('PDF_LOCATIONS'):
+            recommendations.append("PDF: Download and parse PDF document(s)")
+        
+        if modality_counts.get('GOOGLE_MAPS_LINKS') or modality_counts.get('GOOGLE_MAPS_LINK'):
+            recommendations.append("GMAPS_URL: Extract coordinates from Google Maps URLs")
+        
+        # 3. HARDER: Need to interact with page/API
         if modality_counts.get('GOOGLE_MAPS_EMBED') or modality_counts.get('GOOGLE_MAPS_API'):
-            recommendations.append("Extract from Google Maps embed")
+            recommendations.append("GMAPS_EMBED: Extract markers from embedded Google Maps (may need Places API)")
         
-        if modality_counts.get('GOOGLE_MAPS_LINKS'):
-            recommendations.append("Parse Google Maps URLs")
+        if any('MAP_MAPBOX' in k or 'MAP_LEAFLET' in k or 'MAP_ARCGIS' in k for k in modality_counts):
+            lib_name = next((k.replace('MAP_', '') for k in modality_counts if 'MAP_' in k), 'UNKNOWN')
+            recommendations.append(f"MAP_LIB: Query {lib_name} layer data/GeoJSON endpoint")
         
-        if any('MAP_' in k for k in modality_counts):
-            recommendations.append("Query map API/data source")
+        if modality_counts.get('LOCATION_IFRAME'):
+            recommendations.append("IFRAME: Load iframe source URL directly and scrape")
         
-        if modality_counts.get('PDF_LOCATIONS'):
-            recommendations.append("Parse PDF documents")
+        # 4. HARDEST: Requires automation/interaction
+        if modality_counts.get('CLICKABLE_LIST') or modality_counts.get('LOCATION_LIST_STRUCTURE'):
+            recommendations.append("CLICK: Automate clicks on list items to reveal location data")
         
-        if modality_counts.get('LOCATION_SEARCH'):
-            recommendations.append("Automate location search form")
+        if modality_counts.get('LOCATION_SEARCH') or modality_counts.get('LOCATION_FINDER'):
+            recommendations.append("FORM: Automate location search form (by state/zip/city)")
         
-        if modality_counts.get('JSON_LD_LOCATION'):
-            recommendations.append("Parse JSON-LD structured data")
+        if modality_counts.get('STATIC_IMAGE_MAP'):
+            recommendations.append("IMAGE: OCR/manual extraction from static image map")
         
-        return '; '.join(recommendations) if recommendations else "Manual review needed"
+        return ' | '.join(recommendations) if recommendations else "Manual review needed"
 
 
 def classify_all_carriers(data_dir: Path) -> Dict[str, CarrierReport]:
