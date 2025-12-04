@@ -69,6 +69,8 @@ class LocationClassifier:
         r'/terminals/?$',           # ends with /terminals
         r'/terminals$',             # saia.com/tools-and-resources/terminals
         r'terminals/?$',            # any URL ending in terminals
+        r'loadboard.*map',          # jbhunt.com/loadboard/load-board/map
+        r'load-board.*map',         # alternative loadboard format
         r'/service-centers/?$',
         r'/service-center/?$',
         r'service-center-locator',  # odfl service center locator
@@ -569,7 +571,8 @@ class LocationClassifier:
         if 'maps.googleapis.com/maps/api/js' in html_lower:
             # Check for various map initialization patterns
             map_init_patterns = ['new google.maps.map', 'google.maps.marker', 
-                                'google.maps.infowindow', 'initmap', 'mapinit', 'loadmap']
+                                'google.maps.infowindow', 'initmap', 'mapinit', 'loadmap',
+                                'journeysharing', 'fleetengine']  # Fleet tracking/load board maps
             if any(p in html_lower for p in map_init_patterns):
                 # Check for multiple markers (evidence of multiple locations)
                 marker_count = html_lower.count('google.maps.marker')
@@ -579,13 +582,16 @@ class LocationClassifier:
                 # Also count LatLng which indicates markers
                 latlng_count = len(re.findall(r'latlng\s*\(', html_lower))
                 
-                if marker_count >= 3 or latlng_count >= 3:
+                # Journey Sharing library = fleet tracking with multiple vehicles/loads
+                has_fleet_tracking = 'journeysharing' in html_lower or 'fleetengine' in html_lower
+                
+                if marker_count >= 3 or latlng_count >= 3 or has_fleet_tracking:
                     return LocationSignal(
                         signal_type='GOOGLE_MAPS_API',
                         confidence='high',
                         points=5,
-                        details=f'Google Maps API with multiple markers (~{max(marker_count, latlng_count)})',
-                        evidence='maps.googleapis.com with multiple markers'
+                        details=f'Google Maps API with {"fleet tracking" if has_fleet_tracking else f"~{max(marker_count, latlng_count)} markers"}',
+                        evidence='maps.googleapis.com with location data'
                     )
                 else:
                     # Single marker = likely just HQ
