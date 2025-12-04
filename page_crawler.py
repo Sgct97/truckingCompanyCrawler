@@ -181,12 +181,20 @@ class PageCrawler:
         """Crawl a single page and extract data."""
         self.visited_urls.add(url)
         
+        # Pre-check if this is an INDEX page (needs full JS render for SPAs)
+        is_index = self._is_index_page(url)
+        url_lower = url.lower()
+        
         try:
             # Navigate to page
+            # For homepage/index pages: wait for network to settle (SPA content loads via AJAX)
+            # For other pages: just wait for DOM (faster)
+            wait_strategy = 'networkidle' if (is_homepage or is_index) else 'domcontentloaded'
+            
             response = await page.goto(
                 url,
                 timeout=PAGE_TIMEOUT_MS,
-                wait_until='domcontentloaded'
+                wait_until=wait_strategy
             )
             
             if not response:
@@ -199,10 +207,6 @@ class PageCrawler:
             if status_code >= 400:
                 self.failed_urls.add(url)
                 return None
-            
-            # Check if this is an INDEX page (highest priority - needs full JS render)
-            url_lower = url.lower()
-            is_index = self._is_index_page(url)
             
             # Only INDEX pages and homepage get extended wait time
             if is_homepage or is_index:
