@@ -9,8 +9,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 CRAWL_OUTPUT_DIR = DATA_DIR / "crawled_pages"
 REPORTS_DIR = DATA_DIR / "reports"
 
-# Input file
-CARRIERS_FILE = PROJECT_ROOT.parent / "2025-11-25 Top Fleets for Spenser.xlsx"
+# Input file (in same directory as crawler code)
+CARRIERS_FILE = PROJECT_ROOT / "2025-11-25 Top Fleets for Spenser.xlsx"
 
 # Crawl settings
 MAX_PAGES_PER_SITE = 500  # Safety cap - crawls all discovered links up to this limit
